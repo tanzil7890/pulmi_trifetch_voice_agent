@@ -1,0 +1,23 @@
+{
+  "tools": {
+    "identify_patient": "8b4c394e-b302-4975-86a2-f87769aa45fa",
+    "check_insurance": "fe40df7a-ad94-412c-9ae7-31469c4c378c",
+    "verify_study_auth": "539d7d5d-3a04-4207-8e97-575bc2f74343",
+    "find_slots": "6f22dca5-091d-4f91-b7fa-868a6dd1e7c2",
+    "book_appointment": "afc3967b-aed8-4c4d-b608-b3f38953f673",
+    "reschedule_appointment": "79e661e9-ca57-4d85-ab3c-cba0ca1ba354",
+    "cancel_appointment": "805fbb73-344c-4621-b050-6045fead50f8",
+    "confirm_appointment": "b9adb803-c2b4-4fab-88ee-7279d60b3d66",
+    "capture_refill": "7a85fb28-13b3-4d98-b609-8f4a0b2efe00",
+    "quote_copay": "33359e21-7063-4b51-821a-78f1f67a5456",
+    "classify_and_route": "5fe78c05-ac51-45d8-a5fe-2b36c28de38e",
+    "escalate_to_staff": "a3efe261-ffe3-4329-867e-b64de9f3602f",
+    "flag_emergency": "1f160948-f9ae-4661-bf01-198e0050ead6",
+    "transfer_to_staff": "34b063fa-f297-4823-a32d-1449f6af48f3"
+  },
+  "assistants": {
+    "inbound": "bd47ec76-c7a7-4323-b007-b8153831a1a0",
+    "outbound-sleep": "993f8ee4-c99a-4ecd-b036-0cd0cb547b84",
+    "outbound-referral": "6bd2e3e9-9336-4ea4-9d32-4a7c0153b2d4"
+  }
+}
