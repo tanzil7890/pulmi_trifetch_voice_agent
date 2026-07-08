@@ -10,6 +10,7 @@ export type InboundOutcome = (typeof INBOUND_OUTCOMES)[number];
 
 export const OUTBOUND_OUTCOMES = [
   "scheduled",
+  "callback_requested",
   "declined",
   "dnd",
   "other_pulm",
@@ -41,6 +42,12 @@ export function queueTransitionFor(
   switch (outcome) {
     case "scheduled":
       return { status: "scheduled" };
+    case "callback_requested":
+      // Patient reached; staff owns the follow-up (flag carries preferences).
+      // Row stays open with a next-business-day recheck so it can't silently
+      // fall through if the staff callback never happens.
+      if (attemptCount >= attemptCap) return { status: "cap_reached" };
+      return { status: "ready", retryNextBusinessDay: true };
     case "declined":
     case "dnd":
     case "other_pulm":

@@ -45,6 +45,7 @@ const OUTBOUND_STRUCTURED_SCHEMA = {
       type: "string",
       enum: [
         "scheduled",
+        "callback_requested",
         "declined",
         "dnd",
         "other_pulm",
@@ -265,7 +266,10 @@ export function buildAssistantPayload(spec: AssistantSpec, serverUrl: string, se
       summaryPlan: {
         enabled: true,
         messages: [
-          { role: "system", content: spec.summaryPrompt },
+          {
+            role: "system",
+            content: `${spec.summaryPrompt} Use only facts present in the transcript — never insert placeholders like "[Insert Date]" or bracketed unknowns; simply omit anything not in the transcript.`,
+          },
           { role: "user", content: "Transcript:\n{{transcript}}" },
         ],
       },
@@ -276,7 +280,7 @@ export function buildAssistantPayload(spec: AssistantSpec, serverUrl: string, se
           {
             role: "system",
             content:
-              "Extract the structured call data per the schema from this transcript. Classify the outcome exactly per the enum. Outcome guidance: vm_left ONLY when the call reached an answering machine/voicemail and a message was left. If a live person was spoken with and no appointment was booked, use spoke_no_appt (inbound) or the matching decline/unreachable reason (outbound). resolved_scheduled/scheduled require an actually confirmed booking or resolved request. \n\nJson Schema:\n{{schema}}\n\nOnly respond with the JSON.",
+              "Extract the structured call data per the schema from this transcript. Classify the outcome exactly per the enum. Outcome guidance: vm_left ONLY when the call reached an answering machine/voicemail and a message was left. unreachable/out_of_service ONLY for wrong numbers or dead lines — never when the patient was actually spoken with. If the patient was reached but nothing was booked and staff will follow up, use callback_requested (outbound) or spoke_no_appt (inbound). resolved_scheduled/scheduled require an actually confirmed booking. \n\nJson Schema:\n{{schema}}\n\nOnly respond with the JSON.",
           },
           { role: "user", content: "Transcript:\n{{transcript}}" },
         ],
