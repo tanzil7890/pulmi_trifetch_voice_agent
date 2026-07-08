@@ -229,6 +229,33 @@ export const TOOL_DEFINITIONS: FunctionToolDef[] = [
     },
   },
   {
+    name: "transfer_to_staff",
+    description:
+      "Transfer the caller to the staff member who owns their topic. ONLY during business hours and ONLY after hearing and classifying the caller's concern. If the result says no one is available, do NOT retry: capture full intake and use escalate_to_staff.",
+    parameters: {
+      type: "object",
+      properties: {
+        topic: {
+          type: "string",
+          enum: [
+            "confirmations_rescheduling",
+            "bhc_scheduling",
+            "incoming_501_vms",
+            "nv_sm_scheduling",
+            "dme",
+            "incoming_general",
+            "np_intermountain_echo_doppler",
+            "np_other_pcp_ss_allergy",
+          ],
+          description: "The caller's classified topic",
+        },
+        summary: { type: "string", description: "One-sentence summary of the concern" },
+      },
+      required: ["topic"],
+    },
+    requestStartMessage: "Let me see who's available for that.",
+  },
+  {
     name: "flag_emergency",
     description:
       "EMERGENCY ONLY: caller described urgent/life-threatening symptoms. Pages a live human immediately, even off-hours. Also direct the caller to 911/ER yourself.",

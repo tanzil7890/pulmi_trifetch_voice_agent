@@ -19,12 +19,18 @@ import {
   type LocationCode,
 } from "@/core/scheduling/rules";
 import { routeTopic } from "@/core/routing";
+import { decideHandoff } from "@/core/escalation";
 import { canBook, type ToolExecutionRecord } from "@/core/verification";
 import { getPorts } from "@/ports";
 
 type Args = Record<string, unknown>;
 type ToolResult = Record<string, unknown>;
-type Handler = (args: Args, vapiCallId: string) => Promise<ToolResult>;
+/** Live-call context: controlUrl lets a handler act on the call (e.g. transfer). */
+export interface CallContext {
+  controlUrl?: string;
+  callType?: string;
+}
+type Handler = (args: Args, vapiCallId: string, ctx?: CallContext) => Promise<ToolResult>;
 
 function str(v: unknown): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
@@ -432,6 +438,71 @@ const classify_and_route: Handler = async (args) => {
   return { ext: owner.ext, ownerName: owner.ownerName, owns: owner.owns };
 };
 
+// Dynamic staff transfer (spec §3.3): route the topic, check availability, and
+// execute the transfer by POSTing to the live call's control URL (Vapi dynamic
+// transfer pattern). Refuses off-hours, for unavailable staff, and for calls
+// with no PSTN leg (web/simulation) — the assistant then falls back to
+// escalate_to_staff per its prompt.
+const transfer_to_staff: Handler = async (args, vapiCallId, ctx) => {
+  const topic = str(args.topic) ?? "incoming_general";
+  const owner = routeTopic(topic);
+  const staffRows = await db().select().from(schema.staffAvailability);
+  const decision = decideHandoff(
+    owner.ext,
+    new Date(),
+    staffRows.map((s) => ({
+      ext: s.ext,
+      ownerName: s.ownerName,
+      phoneNumber: s.phoneNumber,
+      available: s.available,
+    })),
+  );
+
+  const unavailable = {
+    transferred: false,
+    tellCaller:
+      "No staff member is reachable for a live transfer right now. Capture full intake (name, date of birth, callback number, reason, actions taken) and use escalate_to_staff. Do not mention voicemail.",
+  };
+
+  if (decision.action === "flag") return unavailable;
+  const isPhoneCall = (ctx?.callType ?? "").toLowerCase().includes("phone");
+  if (!isPhoneCall || !ctx?.controlUrl) return unavailable;
+
+  try {
+    const response = await fetch(ctx.controlUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "transfer",
+        destination: {
+          type: "number",
+          number: decision.phoneNumber,
+          extension: decision.ext,
+        },
+        content: `Transferring you to ${decision.ownerName} now.`,
+      }),
+    });
+    if (!response.ok) {
+      console.error(`[transfer_to_staff] control URL ${response.status}`);
+      return unavailable;
+    }
+  } catch (err) {
+    console.error("[transfer_to_staff] control URL failed", err);
+    return unavailable;
+  }
+
+  await writeNote(
+    null,
+    vapiCallId,
+    `Transferred caller to ${decision.ownerName} (ext ${decision.ext}) for ${owner.owns}.`,
+  );
+  return {
+    transferred: true,
+    ownerName: decision.ownerName,
+    tellCaller: `The caller is being transferred to ${decision.ownerName} now.`,
+  };
+};
+
 const escalate_to_staff: Handler = async (args, vapiCallId) => {
   const reason = str(args.reason) ?? "low_confidence";
   const intake = (args.intake ?? {}) as Record<string, unknown>;
@@ -524,6 +595,7 @@ export const TOOL_HANDLERS: Record<string, Handler> = {
   capture_refill,
   quote_copay,
   classify_and_route,
+  transfer_to_staff,
   escalate_to_staff,
   flag_emergency,
 };

@@ -2,6 +2,8 @@
 // NOTE: compliancePlan.hipaaEnabled stays true — required posture for PHI calls.
 
 import { inboundSystemPrompt } from "../prompts/inbound.system";
+import { frontDeskSystemPrompt } from "../prompts/frontdesk.system";
+import { schedulerSystemPrompt } from "../prompts/scheduler.system";
 import { outboundReferralSystemPrompt } from "../prompts/outbound-referral.system";
 import { outboundSleepSystemPrompt } from "../prompts/outbound-sleep.system";
 
@@ -61,14 +63,52 @@ const OUTBOUND_STRUCTURED_SCHEMA = {
 } as const;
 
 export interface AssistantSpec {
-  key: "inbound" | "outbound-sleep" | "outbound-referral";
+  key: "inbound" | "front-desk" | "scheduler" | "outbound-sleep" | "outbound-referral";
   name: string;
   firstMessage: string;
   systemPrompt: () => string;
   structuredDataSchema: typeof INBOUND_STRUCTURED_SCHEMA | typeof OUTBOUND_STRUCTURED_SCHEMA;
   summaryPrompt: string;
   firstMessageMode?: string;
+  /** Subset of tool names to attach; undefined = all function tools. */
+  toolNames?: string[];
+  /** Outbound: detect answering machines and leave the generic no-PHI message. */
+  voicemail?: boolean;
 }
+
+// Generic, PHI-free voicemail script (spec §4 voicemail rule). Vapi speaks this
+// automatically when voicemailDetection fires — prompt rules stay as backup.
+const GENERIC_VOICEMAIL_MESSAGE =
+  "Hello, this is the scheduling team at The Pulmonology Group. Please call us back at 702-780-0300. Thank you.";
+
+// Deepgram nova-3 keyterm boosting: domain vocabulary that STT otherwise
+// mangles — provider names, sites, streets, meds, study types
+// (Voice_Agent_STT_Edge_Cases.md case 10).
+const TRANSCRIBER_KEYTERMS = [
+  "pulmonology",
+  "Sayal",
+  "Przybylski",
+  "Henderson",
+  "Summerlin",
+  "Horizon Ridge",
+  "Fire Mesa",
+  "Sahara",
+  "Symbicort",
+  "albuterol",
+  "Spiriva",
+  "Trelegy",
+  "CPAP",
+  "sleep study",
+  "PFT",
+  "HST",
+  "PSG",
+  "titration",
+  "copay",
+  "deductible",
+  "Medicare",
+  "Aetna",
+  "Cigna",
+];
 
 export const ASSISTANT_SPECS: AssistantSpec[] = [
   {
@@ -81,6 +121,47 @@ export const ASSISTANT_SPECS: AssistantSpec[] = [
     summaryPrompt:
       "Write a memo-to-record note for the patient chart: caller identity, reason for call, actions taken on the call, and the agreed next step. 2-4 sentences, plain factual prose.",
   },
+  // ── Inbound squad members (spec: front-desk triage + scheduling specialist) ──
+  {
+    key: "front-desk",
+    name: "pulm-front-desk",
+    firstMessage:
+      "Thank you for calling The Pulmonology Group. This call may be recorded for quality. How can I help you today?",
+    systemPrompt: frontDeskSystemPrompt,
+    structuredDataSchema: INBOUND_STRUCTURED_SCHEMA,
+    summaryPrompt:
+      "Write a memo-to-record note for the patient chart: caller identity, reason for call, actions taken on the call, and the agreed next step. 2-4 sentences, plain factual prose.",
+    toolNames: [
+      "identify_patient",
+      "capture_refill",
+      "quote_copay",
+      "classify_and_route",
+      "transfer_to_staff",
+      "escalate_to_staff",
+      "flag_emergency",
+    ],
+  },
+  {
+    key: "scheduler",
+    name: "pulm-scheduler",
+    firstMessage: "Hi, I'm the scheduling assistant — I can get that set up for you.",
+    systemPrompt: schedulerSystemPrompt,
+    structuredDataSchema: INBOUND_STRUCTURED_SCHEMA,
+    summaryPrompt:
+      "Write a memo-to-record note for the patient chart: caller identity, scheduling action requested, verification results, what was booked or blocked and why, and the agreed next step. 2-4 sentences, plain factual prose.",
+    toolNames: [
+      "identify_patient",
+      "check_insurance",
+      "verify_study_auth",
+      "find_slots",
+      "book_appointment",
+      "reschedule_appointment",
+      "cancel_appointment",
+      "confirm_appointment",
+      "escalate_to_staff",
+      "flag_emergency",
+    ],
+  },
   {
     key: "outbound-sleep",
     name: "pulm-outbound-sleep",
@@ -90,6 +171,17 @@ export const ASSISTANT_SPECS: AssistantSpec[] = [
     structuredDataSchema: OUTBOUND_STRUCTURED_SCHEMA,
     summaryPrompt:
       "Write a memo-to-record note: outbound sleep-study scheduling attempt, who was reached, outcome, anything booked, next step.",
+    toolNames: [
+      "identify_patient",
+      "check_insurance",
+      "verify_study_auth",
+      "find_slots",
+      "book_appointment",
+      "reschedule_appointment",
+      "escalate_to_staff",
+      "flag_emergency",
+    ],
+    voicemail: true,
   },
   {
     key: "outbound-referral",
@@ -100,6 +192,17 @@ export const ASSISTANT_SPECS: AssistantSpec[] = [
     structuredDataSchema: OUTBOUND_STRUCTURED_SCHEMA,
     summaryPrompt:
       "Write a memo-to-record note: outbound referral scheduling attempt, who was reached, outcome, anything booked, next step.",
+    toolNames: [
+      "identify_patient",
+      "check_insurance",
+      "verify_study_auth",
+      "find_slots",
+      "book_appointment",
+      "reschedule_appointment",
+      "escalate_to_staff",
+      "flag_emergency",
+    ],
+    voicemail: true,
   },
 ];
 
@@ -115,8 +218,36 @@ export function buildAssistantPayload(spec: AssistantSpec, serverUrl: string, se
       tools: undefined as unknown, // toolIds attached by sync script
     },
     voice: { provider: "vapi", voiceId: "Elliot" },
-    transcriber: { provider: "deepgram", model: "nova-3", language: "en" },
+    // "multi" (nova-3 multilingual) so Spanish/code-switched speech transcribes
+    // as real Spanish instead of English garbage — the agent must RECOGNIZE the
+    // language barrier to run the escalate-for-Spanish-assistance path.
+    transcriber: {
+      provider: "deepgram",
+      model: "nova-3",
+      language: "multi",
+      keyterm: TRANSCRIBER_KEYTERMS,
+    },
     compliancePlan: { hipaaEnabled: true },
+    // Call quality: fast-but-smart turn taking, noise robustness, silence handling.
+    startSpeakingPlan: {
+      waitSeconds: 0.4,
+      smartEndpointingPlan: { provider: "livekit" },
+    },
+    stopSpeakingPlan: { numWords: 2, voiceSeconds: 0.2, backoffSeconds: 1 },
+    backgroundDenoisingEnabled: true,
+    silenceTimeoutSeconds: 45,
+    maxDurationSeconds: 900,
+    messagePlan: {
+      idleMessages: ["Are you still there?", "I'm still here whenever you're ready."],
+      idleTimeoutSeconds: 12,
+      idleMessageMaxSpokenCount: 2,
+    },
+    ...(spec.voicemail
+      ? {
+          voicemailDetection: { provider: "google" },
+          voicemailMessage: GENERIC_VOICEMAIL_MESSAGE,
+        }
+      : {}),
     server: {
       url: serverUrl,
       timeoutSeconds: 20,

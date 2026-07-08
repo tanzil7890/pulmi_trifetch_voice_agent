@@ -17,6 +17,7 @@ const REGISTRY_PATH = path.join(__dirname, "..", "src", "vapi", "registry.json")
 interface Registry {
   tools: Record<string, string>; // tool name → vapi tool id
   assistants: Record<string, string>; // assistant key → vapi assistant id
+  squads?: Record<string, string>; // squad key → vapi squad id
 }
 
 function loadEnv() {
@@ -105,66 +106,20 @@ async function main() {
     console.log(`✓ tool created: ${def.name} → ${created.id}`);
   }
 
-  // 1b. Dynamic transferCall tool — NO destinations (guide Phase 8 §9.2):
-  // assistant calls it with a topic; Vapi fires transfer-destination-request
-  // and our webhook decides the destination (or refuses → agent flags).
-  const transferBody: any = {
-    type: "transferCall",
-    function: {
-      name: "transfer_to_staff",
-      description:
-        "Transfer the caller to the staff member who owns their topic. ONLY during business hours and ONLY after hearing and classifying the caller's concern. If the transfer fails or no one is available, fall back to escalate_to_staff.",
-      parameters: {
-        type: "object",
-        properties: {
-          topic: {
-            type: "string",
-            enum: [
-              "confirmations_rescheduling",
-              "bhc_scheduling",
-              "incoming_501_vms",
-              "nv_sm_scheduling",
-              "dme",
-              "incoming_general",
-              "np_intermountain_echo_doppler",
-              "np_other_pcp_ss_allergy",
-            ],
-            description: "The caller's classified topic",
-          },
-          summary: { type: "string", description: "One-sentence summary of the concern" },
-        },
-        required: ["topic"],
-      },
-    },
-  };
-  const transferExisting = registry.tools["transfer_to_staff"];
-  if (dry) {
-    console.log(`[dry] tool transfer_to_staff: ${transferExisting ? "update" : "create"}`);
-  } else if (transferExisting) {
-    try {
-      await (client.tools as any).update({ id: transferExisting, body: transferBody });
-      console.log("✓ tool updated: transfer_to_staff");
-    } catch {
-      const created: any = await (client.tools as any).create(transferBody);
-      registry.tools["transfer_to_staff"] = created.id;
-      console.log(`✓ tool recreated: transfer_to_staff → ${created.id}`);
-    }
-  } else {
-    const created: any = await (client.tools as any).create(transferBody);
-    registry.tools["transfer_to_staff"] = created.id;
-    console.log(`✓ tool created: transfer_to_staff → ${created.id}`);
-  }
+  // NOTE: transfer_to_staff is a plain function tool in TOOL_DEFINITIONS — the
+  // webhook handler executes the transfer by POSTing to the call's control URL
+  // (Vapi dynamic-transfer pattern). The legacy transferCall/transfer-destination-
+  // request flow hangs calls in "forwarding" and is not used.
 
   const toolIds = TOOL_DEFINITIONS.map((d) => registry.tools[d.name]).filter(Boolean);
 
   // 2. Assistants
   for (const spec of ASSISTANT_SPECS) {
     const payload: any = buildAssistantPayload(spec, serverUrl, secret);
-    // Inbound gets the dynamic transfer tool; outbound assistants never transfer.
-    payload.model.toolIds =
-      spec.key === "inbound" && registry.tools["transfer_to_staff"]
-        ? [...toolIds, registry.tools["transfer_to_staff"]]
-        : toolIds;
+    // Each spec gets its declared tool subset (all function tools if undeclared).
+    payload.model.toolIds = spec.toolNames
+      ? spec.toolNames.map((n) => registry.tools[n]).filter(Boolean)
+      : toolIds;
     delete payload.model.tools;
 
     const existingId = registry.assistants[spec.key];
@@ -187,19 +142,84 @@ async function main() {
     console.log(`✓ assistant created: ${spec.name} → ${created.id}`);
   }
 
-  // 3. Attach phone number → inbound assistant (static wiring, guide §6.5)
+  // 3. Inbound squad: front-desk (entry) ⇄ scheduler. In-call handoffs keep
+  // the conversation context; each member carries only its own tool subset.
+  registry.squads ??= {};
+  const frontDeskId = registry.assistants["front-desk"];
+  const schedulerId = registry.assistants["scheduler"];
+  if (frontDeskId && schedulerId && !dry) {
+    const squadBody: any = {
+      name: "pulm-inbound-squad",
+      members: [
+        {
+          assistantId: frontDeskId,
+          assistantDestinations: [
+            {
+              type: "assistant",
+              assistantName: "pulm-scheduler",
+              message: "Let me get you over to our scheduling assistant — one moment.",
+              description:
+                "The caller wants to book, reschedule, cancel, or confirm an appointment and is ready to proceed.",
+            },
+          ],
+        },
+        {
+          assistantId: schedulerId,
+          assistantDestinations: [
+            {
+              type: "assistant",
+              assistantName: "pulm-front-desk",
+              message: "Let me hand you back to our front desk — one moment.",
+              description:
+                "The caller needs something other than scheduling: billing, refills, general questions, or complaints.",
+            },
+          ],
+        },
+      ],
+    };
+    const existingSquadId = registry.squads["inbound"];
+    try {
+      if (existingSquadId) {
+        // squads.update flattens like assistants.update: { id, ...body }
+        await (client.squads as any).update({ id: existingSquadId, ...squadBody });
+        console.log(`✓ squad updated: pulm-inbound-squad (${existingSquadId})`);
+      } else {
+        const created: any = await (client.squads as any).create(squadBody);
+        registry.squads["inbound"] = created.id;
+        console.log(`✓ squad created: pulm-inbound-squad → ${created.id}`);
+      }
+    } catch (e) {
+      if (existingSquadId) {
+        try {
+          const created: any = await (client.squads as any).create(squadBody);
+          registry.squads["inbound"] = created.id;
+          console.log(`✓ squad recreated: pulm-inbound-squad → ${created.id}`);
+        } catch (e2) {
+          console.warn(`squad upsert failed: ${e2}`);
+        }
+      } else {
+        console.warn(`squad create failed: ${e}`);
+      }
+    }
+  }
+
+  // 4. Attach phone number → inbound squad (falls back to the monolith
+  // inbound assistant if the squad is unavailable).
   const phoneNumberId = process.env.VAPI_PHONE_NUMBER_ID;
   const inboundId = registry.assistants["inbound"];
-  if (phoneNumberId && inboundId && !dry) {
+  const squadId = registry.squads["inbound"];
+  if (phoneNumberId && (squadId || inboundId) && !dry) {
     try {
       await (client.phoneNumbers as any).update({
         id: phoneNumberId,
         body: {
-          assistantId: inboundId,
+          ...(squadId ? { squadId, assistantId: null } : { assistantId: inboundId }),
           server: { url: serverUrl, headers: { "x-vapi-secret": secret } },
         },
       });
-      console.log(`✓ phone number ${phoneNumberId} → inbound assistant ${inboundId}`);
+      console.log(
+        `✓ phone number ${phoneNumberId} → ${squadId ? `squad ${squadId}` : `inbound assistant ${inboundId}`}`,
+      );
     } catch (e) {
       console.warn(`phone number attach failed: ${e}`);
     }

@@ -1,17 +1,38 @@
 # Runbook
 
+## Architecture (inbound)
+
+The practice number is attached to the **`pulm-inbound-squad`** Vapi squad:
+
+- **`pulm-front-desk`** (entry member): greeting, general Q&A, self-pay pricing, refills, copay, billing/complaints, staff transfers, emergency/clinical hard stops. Hands appointment work to the scheduler.
+- **`pulm-scheduler`**: verification checklist (identity → insurance → HMO/referral → study auth → demographics) and all booking/reschedule/cancel/confirm tools. Hands non-scheduling topics back to the front desk.
+
+Each member carries only its own tool subset; both carry `escalate_to_staff` + `flag_emergency`. The monolith `pulm-inbound` assistant is kept in sync as an A/B fallback — re-point the phone by setting `assistantId` instead of `squadId` if the squad ever misbehaves. Outbound assistants (`pulm-outbound-referral`, `pulm-outbound-sleep`) are unchanged single assistants with Vapi voicemail detection + a generic no-PHI voicemail message.
+
 ## Deploy / go-live steps
 
 1. Deploy to Vercel (or ngrok for local testing): `vercel` / `ngrok http 3000`.
 2. Set `APP_BASE_URL=https://<your-domain>` in `.env` / Vercel env.
-3. Re-run `pnpm vapi:sync` — this points every tool + assistant `server.url` at the new base URL. **Until this is done with a public URL, live calls cannot reach tools.**
+3. Re-run `pnpm vapi:sync` — this points every tool + assistant `server.url` at the new base URL, upserts the squad, and re-attaches the phone number to it. **Until this is done with a public URL, live calls cannot reach tools.**
 4. Set `EMERGENCY_PAGE_NUMBER` (E.164) — emergency paging places a real Vapi call to this number.
 5. Set `CRON_SECRET` in Vercel for the outbound cron route.
-6. Test call the Vapi number (+1 980-227-3132): ask hours → answered; ask "should I double my inhaler dose?" → refused + escalated; describe an emergency → directed to 911 + page fired.
+6. Test call the Vapi number (+1 940-286-2029): ask hours → answered; ask "should I double my inhaler dose?" → refused + escalated; describe an emergency → directed to 911 + page fired.
 
 ## Vapi Labs TEST / Simulations
 
-Use Vapi Labs TEST as the primary conversation-brain test surface. The repo script creates Vapi Simulation personalities/scenarios and runs them against either the synced assistant or an inline prompt-only assistant.
+Use Vapi Labs TEST as the primary conversation-brain test surface. The repo script creates Vapi Simulation personalities/scenarios and runs them against either the synced target or an inline prompt-only assistant.
+
+The suite covers two catalogs, kept separate so failures are easy to diagnose:
+
+- `--suite=policy` — the 15-case edge catalog from `Voice_Agent_Edge_Cases.md`: the 5 original smoke cases plus deceased-patient, wrong-number/no-PHI, do-not-call, voicemail/no-PHI, HMO-without-referral, missing-demographics, study-without-auth, incomplete-refill, angry-billing, and off-hours-handoff.
+- `--suite=stt` — the 10-case voice/STT catalog from `Voice_Agent_STT_Edge_Cases.md`: Southern accent, Spanish code-switching, Spanish-dominant, elderly low-volume, slurred possible emergency, breathless short phrases, background-noise interference, speakerphone clipped-yes, fast talker with numbers, similar-sounding names/medications/streets. These exercise the "Audio & verification discipline" prompt block: readback of critical fields, spelling confirmation before lookup, no invented data, Spanish → staff escalation, degraded audio + breathing hints → emergency.
+- Default (no `--suite`) runs all 25.
+
+Inbound cases target the synced **squad** (pass `--no-squad` to A/B the monolith assistant); outbound cases always run inline against the outbound prompts with test patient names. Useful flags: `--case=<substring>`, `--concurrency=N` (default 3), `--max-polls=N`, `--allow-fail`.
+
+Transcriber is Deepgram `nova-3` with `language: "multi"` (English+Spanish) and `keyterm` boosting for practice vocabulary (provider names, sites, streets, meds, study types) — see `TRANSCRIBER_KEYTERMS` in `src/vapi/assistants/index.ts`. Spanish-dominant callers get a confirmed-callback + staff-escalation path, not a booking.
+
+Staff transfers use the Vapi dynamic-transfer pattern: `transfer_to_staff` is a normal function tool; the webhook handler routes the topic, checks business hours + staff availability, and executes the transfer by POSTing `{type: "transfer", destination}` to the call's `monitor.controlUrl`. It refuses (agent falls back to `escalate_to_staff`) when: off-hours, owner unavailable, or the call has no PSTN leg (web/simulation calls). Do NOT use a `transferCall` tool with empty destinations — Vapi never sends `transfer-destination-request` and the call hangs in `forwarding` forever (observed 2026-07-07).
 
 Commands:
 
@@ -66,7 +87,7 @@ The script stores Coval resource IDs in `src/coval/registry.json`. If a Coval re
 If Coval API/CLI agent creation returns a server-side or CLI transport error, create the agent in the Coval dashboard instead:
 
 1. Create/connect an inbound voice agent.
-2. Set its phone number to the Vapi number in E.164 format: `+19802273132`.
+2. Set its phone number to the Vapi number in E.164 format: `+19402862029`.
 3. Copy the Coval agent ID into `.env.local` as `COVAL_AGENT_ID=<id>`.
 4. Rerun `pnpm coval:setup`, then `pnpm coval:run -- --allow-fail`.
 

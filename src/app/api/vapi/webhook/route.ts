@@ -47,6 +47,11 @@ async function handleToolCalls(message: ServerMessage) {
   const vapiCallId = message.call?.id ?? "unknown";
   const toolCalls = message.toolCallList ?? [];
   const results: { name: string; toolCallId: string; result: string }[] = [];
+  const call = (message.call ?? {}) as {
+    type?: string;
+    monitor?: { controlUrl?: string };
+  };
+  const callContext = { controlUrl: call.monitor?.controlUrl, callType: call.type };
 
   for (const tc of toolCalls) {
     const { name, args } = parseToolArguments(tc);
@@ -72,7 +77,7 @@ async function handleToolCalls(message: ServerMessage) {
       status = "error";
     } else {
       try {
-        result = await handler(args, vapiCallId);
+        result = await handler(args, vapiCallId, callContext);
         if (result.error) status = "error";
       } catch (err) {
         // Business errors ride inside the result — Vapi ignores non-200s.
@@ -236,6 +241,15 @@ async function handleTransferDestinationRequest(message: ServerMessage, raw: unk
     params = parseToolArguments(message.toolCallList[0]).args;
   }
   const topic = typeof params.topic === "string" ? params.topic : "incoming_general";
+
+  // Web/simulation calls have no PSTN leg to bridge to a staff extension —
+  // refuse so the assistant falls back to escalate_to_staff (spec §3.3).
+  const callType = (message.call as { type?: string } | undefined)?.type ?? "";
+  if (!callType.toLowerCase().includes("phone")) {
+    return NextResponse.json({
+      error: "No staff member is reachable for a live transfer right now.",
+    });
+  }
 
   const owner = routeTopic(topic);
   const staffRows = await db().select().from(schema.staffAvailability);

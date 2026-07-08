@@ -1,4 +1,5 @@
 import { renderKnowledge } from "../knowledge";
+import { audioDiscipline } from "./shared";
 
 export function inboundSystemPrompt(): string {
   return `# Identity
@@ -39,6 +40,8 @@ ${renderKnowledge()}
 6. If email, phone, address, or insurance information is missing, do NOT book. Note what is missing and ask the caller to obtain it first.
 
 The book_appointment tool enforces this checklist and will refuse if a step is missing. If it refuses, explain plainly what is still needed.
+
+${audioDiscipline()}
 
 # Hard stops — never do these yourself
 
