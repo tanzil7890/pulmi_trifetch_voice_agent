@@ -80,7 +80,7 @@ Three manual calls reviewed end-to-end (transcripts in the Vapi dashboard; side 
 
 ### Outbound (real dial from the queue) — verified working
 
-First live outbound referral call placed via the production path: queue row (ready + auth-verified) → `POST /api/cron/outbound-tick` → Vapi dialed the patient's phone → conversation → end-of-call report → queue transition + attempt memo note.
+outbound referral call placed via the production path: queue row (ready + auth-verified) → `POST /api/cron/outbound-tick` → Vapi dialed the patient's phone → conversation → end-of-call report → queue transition + attempt memo note.
 
 Verified on-call behavior: correct "calling you back to get you scheduled" framing, DOB readback, demographics collected with readback, no invented slots, preferred day/time captured, staff-callback flag with complete intake, honest close ("you won't need to repeat the basics"). Full loop confirmed in Neon: dial → tools → flag → report → queue update → note.
 
