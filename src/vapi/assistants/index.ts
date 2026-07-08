@@ -262,7 +262,13 @@ export function buildAssistantPayload(spec: AssistantSpec, serverUrl: string, se
       "transfer-destination-request",
     ],
     analysisPlan: {
-      summaryPlan: { enabled: true, messages: [{ role: "system", content: spec.summaryPrompt }] },
+      summaryPlan: {
+        enabled: true,
+        messages: [
+          { role: "system", content: spec.summaryPrompt },
+          { role: "user", content: "Transcript:\n{{transcript}}" },
+        ],
+      },
       structuredDataPlan: {
         enabled: true,
         schema: spec.structuredDataSchema,
@@ -270,7 +276,7 @@ export function buildAssistantPayload(spec: AssistantSpec, serverUrl: string, se
           {
             role: "system",
             content:
-              "Extract the structured call data per the schema from this transcript. Classify the outcome exactly per the enum. \n\nJson Schema:\n{{schema}}\n\nOnly respond with the JSON.",
+              "Extract the structured call data per the schema from this transcript. Classify the outcome exactly per the enum. Outcome guidance: vm_left ONLY when the call reached an answering machine/voicemail and a message was left. If a live person was spoken with and no appointment was booked, use spoke_no_appt (inbound) or the matching decline/unreachable reason (outbound). resolved_scheduled/scheduled require an actually confirmed booking or resolved request. \n\nJson Schema:\n{{schema}}\n\nOnly respond with the JSON.",
           },
           { role: "user", content: "Transcript:\n{{transcript}}" },
         ],
