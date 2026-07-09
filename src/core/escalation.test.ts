@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideHandoff, isBusinessHours, isHardStop } from "./escalation";
+import { clinicContext, decideHandoff, isBusinessHours, isHardStop } from "./escalation";
 
 // 18:00 UTC on a Wednesday = 11:00 AM in Las Vegas (PDT, UTC-7) — business hours.
 const WED_BUSINESS = new Date("2026-07-15T18:00:00Z");
@@ -51,6 +51,24 @@ describe("decideHandoff (spec §3.3)", () => {
 
   it("unknown extension → flag", () => {
     expect(decideHandoff("999", WED_BUSINESS, STAFF).action).toBe("flag");
+  });
+});
+
+describe("clinicContext (flag triage stamp)", () => {
+  it("business hours → offHours false, clinic-local time rendered", () => {
+    const ctx = clinicContext(WED_BUSINESS);
+    expect(ctx.offHours).toBe(false);
+    // 18:00 UTC Wed = 11:00 AM Vegas (PDT)
+    expect(ctx.clinicLocalTime).toMatch(/Wed/);
+    expect(ctx.clinicLocalTime).toMatch(/11:00\sAM/);
+  });
+
+  it("weekday night → offHours true", () => {
+    expect(clinicContext(WED_NIGHT).offHours).toBe(true);
+  });
+
+  it("weekend → offHours true", () => {
+    expect(clinicContext(SATURDAY).offHours).toBe(true);
   });
 });
 

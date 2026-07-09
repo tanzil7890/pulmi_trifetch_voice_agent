@@ -17,7 +17,7 @@ export const TOOL_DEFINITIONS: FunctionToolDef[] = [
   {
     name: "identify_patient",
     description:
-      "Verify the caller's identity and look up their patient record. MUST be called before any patient-specific action. Returns patientId, whether they're a known patient, and any missing demographics.",
+      "Verify the caller's identity and look up their patient record. MUST be called before any patient-specific action. Returns patientId, whether they're a known (returning) patient, and any missing demographics. If no record matches, it does NOT create one until you confirm with the caller that they are new and retry with confirmedNewPatient: true.",
     parameters: {
       type: "object",
       properties: {
@@ -25,10 +25,35 @@ export const TOOL_DEFINITIONS: FunctionToolDef[] = [
         lastName: { type: "string", description: "Caller's last name" },
         dob: { type: "string", description: "Date of birth, YYYY-MM-DD" },
         callbackNumber: { type: "string", description: "Best callback phone number" },
+        confirmedNewPatient: {
+          type: "boolean",
+          description:
+            "Set true ONLY after the caller confirmed they are new to the practice AND you re-confirmed name spelling + DOB. Creates their patient record.",
+        },
       },
       required: ["firstName", "lastName", "dob"],
     },
     requestStartMessage: "Let me pull up your record.",
+  },
+  {
+    name: "update_demographics",
+    description:
+      "Save demographics the caller supplies on this call (email, phone, address, insurance payer) to their patient record. Use immediately after identify_patient reports missing demographics — booking stays blocked until the record is complete. Returns what is still missing.",
+    parameters: {
+      type: "object",
+      properties: {
+        patientId: { type: "string", description: "Patient id from identify_patient" },
+        email: { type: "string", description: "Email address, as confirmed with the caller" },
+        phone: { type: "string", description: "Best phone number" },
+        address: { type: "string", description: "Full mailing address" },
+        insurancePayer: {
+          type: "string",
+          description: "Insurance company / plan name as stated by the caller",
+        },
+      },
+      required: ["patientId"],
+    },
+    requestStartMessage: "Let me get that on your record.",
   },
   {
     name: "check_insurance",
@@ -250,6 +275,11 @@ export const TOOL_DEFINITIONS: FunctionToolDef[] = [
           description: "The caller's classified topic",
         },
         summary: { type: "string", description: "One-sentence summary of the concern" },
+        specialistLabel: {
+          type: "string",
+          description:
+            'Caller-facing role to announce, matching what they asked for: e.g. "medication refill specialist", "prior authorization specialist", "billing specialist", "next available staff member" (use that when the caller just wants a human). Omit to announce the staff owner by name.',
+        },
       },
       required: ["topic"],
     },

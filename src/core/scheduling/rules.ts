@@ -88,8 +88,43 @@ const newPatient: AvailabilityRule[] = [1, 2, 3, 4, 5].flatMap((dow) =>
   })),
 );
 
+// Provisional office grids for follow-up visits and daytime in-office tests
+// (PFT / 6MWT, spec §5 "Daytime, in office"). Same open clinic input as the
+// new-patient grid (§7.1) — plain DB rules ops can replace. Without these,
+// any reschedule or follow-up booking dead-ends at "no availability
+// configured" even though the visit type is in scope for inbound self-service.
+const followUp: AvailabilityRule[] = [1, 2, 3, 4, 5].flatMap((dow) =>
+  (["NV", "SM"] as const).map((location) => ({
+    appointmentType: "follow_up" as const,
+    location,
+    dayOfWeek: dow,
+    windowStart: "09:00",
+    windowEnd: "15:00",
+    capacityPerDay: 8,
+    slotMinutes: 30,
+    active: true,
+  })),
+);
+
+const officeTests: AvailabilityRule[] = (["pft", "sixmwt"] as const).flatMap((type) =>
+  [1, 2, 3, 4, 5].flatMap((dow) =>
+    (["NV", "SM"] as const).map((location) => ({
+      appointmentType: type,
+      location,
+      dayOfWeek: dow,
+      windowStart: "09:00",
+      windowEnd: "16:00",
+      capacityPerDay: 4,
+      slotMinutes: 30,
+      active: true,
+    })),
+  ),
+);
+
 export const DEFAULT_RULES: AvailabilityRule[] = [
   ...newPatient,
+  ...followUp,
+  ...officeTests,
   ...psgNv,
   ...psgSm,
   ...titration,

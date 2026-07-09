@@ -60,8 +60,30 @@ export function isBusinessHours(now: Date, hours: BusinessHours = CLINIC_HOURS):
   return hours.days.includes(dayIndex) && hour >= hours.openHour && hour < hours.closeHour;
 }
 
+/**
+ * Triage context stamped into every flag (spec §3.3): whether the clinic was
+ * closed at the time, and the clinic-local timestamp — so staff can sort
+ * overnight items without converting timezones.
+ */
+export function clinicContext(
+  now: Date,
+  hours: BusinessHours = CLINIC_HOURS,
+): { offHours: boolean; clinicLocalTime: string } {
+  const clinicLocalTime = new Intl.DateTimeFormat("en-US", {
+    timeZone: hours.timeZone,
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(now);
+  return { offHours: !isBusinessHours(now, hours), clinicLocalTime };
+}
+
 const FLAG_PROMISE =
-  "Someone from the team will follow up with you. I've written down everything so you won't have to repeat it.";
+  "I've noted everything down, and I'm getting this to the right person as soon as possible — they'll reach out to you just as soon as they can. You won't have to repeat any of it.";
 
 export function decideHandoff(
   targetExt: string,

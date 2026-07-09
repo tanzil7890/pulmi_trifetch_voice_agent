@@ -157,9 +157,9 @@ async function main() {
             {
               type: "assistant",
               assistantName: "pulm-scheduler",
-              message: "Let me get you over to our scheduling assistant — one moment.",
+              message: "Let me get you over to Linda, our scheduling assistant — one moment, please.",
               description:
-                "The caller wants to book, reschedule, cancel, or confirm an appointment and is ready to proceed.",
+                "Use IMMEDIATELY, without asking the caller for permission or confirmation, the moment the caller mentions booking, scheduling, rescheduling, canceling, or confirming an appointment. Do not wait for the caller to agree to a transfer.",
             },
           ],
         },
@@ -171,7 +171,7 @@ async function main() {
               assistantName: "pulm-front-desk",
               message: "Let me hand you back to our front desk — one moment.",
               description:
-                "The caller needs something other than scheduling: billing, refills, general questions, or complaints.",
+                "Use IMMEDIATELY, without asking the caller for permission, when the caller needs something other than scheduling: billing, refills, general questions, or complaints.",
             },
           ],
         },

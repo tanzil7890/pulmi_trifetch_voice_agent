@@ -64,23 +64,26 @@ Agent must classify the caller's topic to the right owner. (Actual transfer mech
 ### 3.1 Core conversational rules
 
 - Answers **live, 24/7** — every call picked up, no voicemail queue.
-- **Never transfer before hearing the caller's concern.**
+- Greeting includes the **recording disclosure** ("this call may be recorded for quality assurance purposes") and the 911 emergency notice. The greeting is interruptible, but the disclosure is **legally required on every call**: if the caller cuts it off, the agent delivers it in its next turn before anything else continues (exception: active emergency → 911 first).
+- **Never transfer before hearing the caller's concern.** Once the concern is clear, scheduling handoffs happen immediately — no "shall I transfer you?" permission questions.
 - Always tell the caller honestly what happens next ("someone from the team will follow up" — never promise a fixed "within 24 hrs" the agent can't guarantee off-hours).
 - End of every resolved call: agent produces a **call summary note** (memo-to-record content — date, time, action taken). *(Writing it into Tebra = integration.)*
 
 ### 3.2 Call types → agent behavior
 
-| Call type | Agent does | Escalate when… |
+| Call type | Agent does *(as implemented)* | Escalate when… |
 |---|---|---|
-| **General Q&A** (hours, location, services, prep, self-pay price) | Answer from §1 | Clinical / medical-advice question |
-| **New appointment** | Run §3.4 verification checklist, collect missing demographics, book per scheduling rules (§5), assign provider/location | Missing info caller can't supply; insurance issue agent can't clear |
-| **Reschedule** | Locate appt, rebook | — |
-| **Cancel** | Cancel + note; log ~1-week follow-up (feeds outbound) | — |
+| **General Q&A** (hours, location, services, prep, self-pay price) | Answer from §1. Locations: city/area first ("Henderson and Summerlin"), full street address only when asked. Self-pay prices quoted ONLY to callers who say they're uninsured / ask cash price | Clinical / medical-advice question |
+| **New appointment** | Front desk (Mark) hands to scheduler (Linda) instantly — no permission question. Linda: spell back full name letter-by-letter; detect **new vs returning** (returning → "Welcome back", default follow-up; no record → confirm "are you a new patient?" before creating one, then default new-patient visit). Run §3.4 checklist (enforced in code by book_appointment); collect missing demographics ONE at a time (email → phone → address → insurance), saving each immediately; book per §5; **assign provider + location**; read prep script in full | Missing info caller can't supply; insurance issue agent can't clear |
+| **Reschedule** | Identify (name + DOB spell-back), locate appt, offer new slots from find_slots only, rebook; provider re-assigned if location changes | — |
+| **Cancel** | Cancel + note; ~1-week follow-up queued automatically (feeds outbound) | — |
 | **Confirmation callback** (patient returning outbound reminder) | Update status Confirmed / Rescheduled / Cancelled | — |
-| **Medication refill** | Capture drug + pharmacy, hand off | Always — agent never runs PA or obtains signatures |
-| **Copay / eligibility** | May quote copay / unmet deductible (data source = integration) | Complex coverage dispute |
-| **Complaint / billing** | Capture details, share available info | Anything requiring account changes / clinical resolution |
-| **Anything else / low confidence** | Capture full intake, hand off per §3.3 | Always |
+| **Medication refill** | Verify identity, capture exact drug + pharmacy (capture_refill), then route to "medication refill specialist" (demo: simulated transfer + hang-up; prod: staff transfer). Never promises the refill, never medication advice | Always — agent never runs PA or obtains signatures |
+| **Prior-auth question / status check** | Never answers PA status. Capture who + what, route to "prior authorization specialist" (demo: simulated transfer) | Always — PA work is staff-only |
+| **Copay / eligibility** | quote_copay; if unverifiable, warm escalate — never guesses dollar amounts | Complex coverage dispute |
+| **Complaint / billing** | Listen fully, capture details (name, DOB, callback, what happened, what they want), escalate to billing. No promised refunds/write-offs/timeframes | Anything requiring account changes / clinical resolution |
+| **Caller insists on a human** | One brief attempt to learn the reason, then no arguing: "I understand. Please hold on while I transfer you to the next available staff member." (demo: simulated transfer) | — |
+| **Anything else / low confidence** | Capture full intake, hand off per §3.3; failed/off-hours transfers auto-create a flag immediately (survives hang-ups), stamped off-hours + clinic-local time | Always |
 
 ### 3.3 Handoff logic (availability-aware)
 

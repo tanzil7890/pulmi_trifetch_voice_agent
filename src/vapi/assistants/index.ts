@@ -73,6 +73,8 @@ export interface AssistantSpec {
   firstMessageMode?: string;
   /** Subset of tool names to attach; undefined = all function tools. */
   toolNames?: string[];
+  /** Vapi voice id; defaults to Elliot. Scheduling persona uses a warm female voice. */
+  voiceId?: string;
   /** Outbound: detect answering machines and leave the generic no-PHI message. */
   voicemail?: boolean;
 }
@@ -83,32 +85,79 @@ const GENERIC_VOICEMAIL_MESSAGE =
   "Hello, this is the scheduling team at The Pulmonology Group. Please call us back at 702-780-0300. Thank you.";
 
 // Deepgram nova-3 keyterm boosting: domain vocabulary that STT otherwise
-// mangles — provider names, sites, streets, meds, study types
-// (Voice_Agent_STT_Edge_Cases.md case 10).
+// mangles — provider names, sites, streets, meds, payers, study types
+// (Voice_Agent_STT_Edge_Cases.md case 10). Deepgram cap: 100 terms /
+// 500 tokens per request — grow from real-call misses, trim before adding
+// past the cap.
 const TRANSCRIBER_KEYTERMS = [
   "pulmonology",
+  // Providers (spec §1)
   "Sayal",
   "Przybylski",
+  "Roberts",
+  "Gabriel",
+  "Colleen Rose",
+  "De Guzman",
+  "Harker",
+  // Sites & streets
   "Henderson",
   "Summerlin",
   "Horizon Ridge",
   "Fire Mesa",
   "Sahara",
+  // Meds (pulmonology)
   "Symbicort",
   "albuterol",
   "Spiriva",
   "Trelegy",
+  "Advair",
+  "Dulera",
+  "Breztri",
+  "Breo",
+  "Singulair",
+  "montelukast",
+  "prednisone",
+  "ProAir",
+  "Ventolin",
+  // Equipment & procedures
   "CPAP",
+  "BiPAP",
+  "APAP",
+  "nebulizer",
+  "oximeter",
+  "spirometry",
+  "polysomnography",
   "sleep study",
   "PFT",
   "HST",
   "PSG",
   "titration",
+  // Insurance & admin (real-call miss: "PPO" heard as "TPO")
   "copay",
   "deductible",
+  "authorization",
+  "referral",
+  "eligibility",
+  "PPO",
+  "HMO",
   "Medicare",
+  "Medicaid",
   "Aetna",
   "Cigna",
+  "UnitedHealthcare",
+  "Blue Cross Blue Shield",
+  "Anthem",
+  "Humana",
+  "Culinary Health Fund",
+  // Staff owner names (spec §2) — spoken in transfer announcements.
+  "Ryan",
+  "Anita",
+  "Bharani",
+  "Kedareshari",
+  "Sakshi",
+  "Kevin",
+  "Sneha",
+  "Prinsu",
 ];
 
 export const ASSISTANT_SPECS: AssistantSpec[] = [
@@ -116,7 +165,7 @@ export const ASSISTANT_SPECS: AssistantSpec[] = [
     key: "inbound",
     name: "pulm-inbound",
     firstMessage:
-      "Thank you for calling The Pulmonology Group. This call may be recorded for quality. How can I help you today?",
+      "Welcome to The Pulmonology Group — I'm Mark. This call may be recorded for quality assurance purposes. If this is a medical emergency, please hang up and dial nine-one-one immediately, or go to the nearest emergency room. How may I help you today?",
     systemPrompt: inboundSystemPrompt,
     structuredDataSchema: INBOUND_STRUCTURED_SCHEMA,
     summaryPrompt:
@@ -127,7 +176,7 @@ export const ASSISTANT_SPECS: AssistantSpec[] = [
     key: "front-desk",
     name: "pulm-front-desk",
     firstMessage:
-      "Thank you for calling The Pulmonology Group. This call may be recorded for quality. How can I help you today?",
+      "Welcome to The Pulmonology Group — I'm Mark. This call may be recorded for quality assurance purposes. If this is a medical emergency, please hang up and dial nine-one-one immediately, or go to the nearest emergency room. How may I help you today?",
     systemPrompt: frontDeskSystemPrompt,
     structuredDataSchema: INBOUND_STRUCTURED_SCHEMA,
     summaryPrompt:
@@ -145,13 +194,19 @@ export const ASSISTANT_SPECS: AssistantSpec[] = [
   {
     key: "scheduler",
     name: "pulm-scheduler",
-    firstMessage: "Hi, I'm the scheduling assistant — I can get that set up for you.",
+    // Proactive on handoff: greet AND immediately ask for what's needed —
+    // a greeting alone stalls the call waiting on a confused caller.
+    // "Linda" = TriFetch's scheduling persona name.
+    firstMessage:
+      "Hi, I'm Linda. I'll help you get that appointment taken care of. Could I have your full name and date of birth so I can pull up your record?",
+    voiceId: "Clara",
     systemPrompt: schedulerSystemPrompt,
     structuredDataSchema: INBOUND_STRUCTURED_SCHEMA,
     summaryPrompt:
       "Write a memo-to-record note for the patient chart: caller identity, scheduling action requested, verification results, what was booked or blocked and why, and the agreed next step. 2-4 sentences, plain factual prose.",
     toolNames: [
       "identify_patient",
+      "update_demographics",
       "check_insurance",
       "verify_study_auth",
       "find_slots",
@@ -159,6 +214,7 @@ export const ASSISTANT_SPECS: AssistantSpec[] = [
       "reschedule_appointment",
       "cancel_appointment",
       "confirm_appointment",
+      "transfer_to_staff",
       "escalate_to_staff",
       "flag_emergency",
     ],
@@ -166,14 +222,16 @@ export const ASSISTANT_SPECS: AssistantSpec[] = [
   {
     key: "outbound-sleep",
     name: "pulm-outbound-sleep",
+    voiceId: "Clara",
     firstMessage:
-      "Hello, this is the scheduling assistant calling from The Pulmonology Group. May I speak with {{patientName}}?",
+      "Hello, this is Linda, the scheduling assistant calling from The Pulmonology Group. May I speak with {{patientName}}?",
     systemPrompt: outboundSleepSystemPrompt,
     structuredDataSchema: OUTBOUND_STRUCTURED_SCHEMA,
     summaryPrompt:
       "Write a memo-to-record note: outbound sleep-study scheduling attempt, who was reached, outcome, anything booked, next step.",
     toolNames: [
       "identify_patient",
+      "update_demographics",
       "check_insurance",
       "verify_study_auth",
       "find_slots",
@@ -187,14 +245,16 @@ export const ASSISTANT_SPECS: AssistantSpec[] = [
   {
     key: "outbound-referral",
     name: "pulm-outbound-referral",
+    voiceId: "Clara",
     firstMessage:
-      "Hi, this is the scheduling assistant calling from The Pulmonology Group — calling you back to get you scheduled. May I speak with {{patientName}}?",
+      "Hi, this is Linda, the scheduling assistant calling from The Pulmonology Group — calling you back to get you scheduled. May I speak with {{patientName}}?",
     systemPrompt: outboundReferralSystemPrompt,
     structuredDataSchema: OUTBOUND_STRUCTURED_SCHEMA,
     summaryPrompt:
       "Write a memo-to-record note: outbound referral scheduling attempt, who was reached, outcome, anything booked, next step.",
     toolNames: [
       "identify_patient",
+      "update_demographics",
       "check_insurance",
       "verify_study_auth",
       "find_slots",
@@ -212,13 +272,16 @@ export function buildAssistantPayload(spec: AssistantSpec, serverUrl: string, se
   return {
     name: spec.name,
     firstMessage: spec.firstMessage,
+    // Callers can barge into the greeting (the compliance disclaimer is long);
+    // without this Vapi plays the whole first message regardless of speech.
+    firstMessageInterruptionsEnabled: true,
     model: {
       provider: "openai",
       model: "gpt-4o",
       messages: [{ role: "system", content: spec.systemPrompt() }],
       tools: undefined as unknown, // toolIds attached by sync script
     },
-    voice: { provider: "vapi", voiceId: "Elliot" },
+    voice: { provider: "vapi", voiceId: spec.voiceId ?? "Elliot" },
     // "multi" (nova-3 multilingual) so Spanish/code-switched speech transcribes
     // as real Spanish instead of English garbage — the agent must RECOGNIZE the
     // language barrier to run the escalate-for-Spanish-assistance path.
@@ -227,6 +290,14 @@ export function buildAssistantPayload(spec: AssistantSpec, serverUrl: string, se
       model: "nova-3",
       language: "multi",
       keyterm: TRANSCRIBER_KEYTERMS,
+      // Normalizes numbers/dates in transcripts — phone digits are the
+      // most-mangled field in real calls.
+      smartFormat: true,
+      // If Deepgram degrades or errors mid-call, fail over instead of dead
+      // air. Gladia: strong accent/code-switching per Vapi docs.
+      fallbackPlan: {
+        transcribers: [{ provider: "gladia" }],
+      },
     },
     compliancePlan: { hipaaEnabled: true },
     // Call quality: fast-but-smart turn taking, noise robustness, silence handling.
@@ -234,7 +305,9 @@ export function buildAssistantPayload(spec: AssistantSpec, serverUrl: string, se
       waitSeconds: 0.4,
       smartEndpointingPlan: { provider: "livekit" },
     },
-    stopSpeakingPlan: { numWords: 2, voiceSeconds: 0.2, backoffSeconds: 1 },
+    // numWords 1: a single word ("wait", "hello") interrupts the agent
+    // mid-sentence; backoff 0.5s so it yields fast and resumes naturally.
+    stopSpeakingPlan: { numWords: 1, voiceSeconds: 0.2, backoffSeconds: 0.5 },
     backgroundDenoisingEnabled: true,
     silenceTimeoutSeconds: 45,
     maxDurationSeconds: 900,

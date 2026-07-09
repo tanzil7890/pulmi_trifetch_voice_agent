@@ -19,7 +19,8 @@ import {
   type LocationCode,
 } from "@/core/scheduling/rules";
 import { routeTopic } from "@/core/routing";
-import { decideHandoff } from "@/core/escalation";
+import { clinicContext, decideHandoff, isBusinessHours } from "@/core/escalation";
+import { getEnv } from "@/lib/env";
 import { canBook, type ToolExecutionRecord } from "@/core/verification";
 import { getPorts } from "@/ports";
 
@@ -139,6 +140,19 @@ const identify_patient: Handler = async (args) => {
       p.lastName.toLowerCase() === lastName.toLowerCase(),
   );
 
+  // No match: do NOT silently create a record — a misheard name would fork a
+  // duplicate chart. The agent must confirm spelling/DOB and that the caller
+  // is genuinely new, then retry with confirmedNewPatient: true.
+  if (!match && args.confirmedNewPatient !== true) {
+    return {
+      patientId: null,
+      knownPatient: false,
+      needsConfirmation: true,
+      note:
+        "No record found for this name and date of birth. First re-confirm the spelling of the name and the date of birth with the caller. If both are correct, ask whether they are new to the practice. If they say they are NEW, call identify_patient again with the same details plus confirmedNewPatient: true. If they say they are an EXISTING patient, the name or DOB is likely misheard — re-collect and try again; never create a duplicate record.",
+    };
+  }
+
   const patient =
     match ??
     (
@@ -148,28 +162,84 @@ const identify_patient: Handler = async (args) => {
         .returning()
     )[0];
 
-  if (!match && callbackNumber == null) {
-    // brand-new shell record with no phone — still identified, but flag gap
-  }
+  const missingDemographics = missingDemographicsOf({
+    ...patient,
+    phone: patient.phone ?? callbackNumber,
+  });
 
-  const missingDemographics = (
-    [
-      ["email", patient.email],
-      ["phone", patient.phone ?? callbackNumber],
-      ["address", patient.address],
-      ["insurance", patient.insurancePayer],
-    ] as const
-  )
-    .filter(([, v]) => v == null)
-    .map(([k]) => k);
+  const statusNote = match
+    ? 'RETURNING patient — greet warmly ("Welcome back!"). Default visit type: follow_up, unless the caller asks for something else (new referral, study, new concern).'
+    : 'NEW patient — record just created. Say "Looks like you\'re new with us — welcome!" Default visit type: new_patient. Expect to collect full demographics.';
 
   return {
     patientId: patient.id,
     knownPatient: Boolean(match),
     missingDemographics,
+    note: `${statusNote} ${
+      missingDemographics.length
+        ? `Missing on file: ${missingDemographics.join(", ")}. Tell the caller once what you need, then collect ONE item at a time (email → phone → address → insurance), confirm each back, and save each with update_demographics as soon as it is confirmed — never bundle two questions (spec §3.2/§3.4.5). Start with: ${missingDemographics[0]}. Only if the caller cannot supply an item: do not book — note it and escalate_to_staff.`
+        : "Record complete."
+    }`,
+  };
+};
+
+function missingDemographicsOf(p: {
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  insurancePayer: string | null;
+}): string[] {
+  return (
+    [
+      ["email", p.email],
+      ["phone", p.phone],
+      ["address", p.address],
+      ["insurance", p.insurancePayer],
+    ] as const
+  )
+    .filter(([, v]) => v == null)
+    .map(([k]) => k);
+}
+
+// Spec §3.2 new-appointment row: "collect missing demographics". Persists what
+// the caller supplies mid-call so the §3.4 booking gate can clear; insurance
+// given verbally is recorded as the payer only — active/HMO status still comes
+// from check_insurance, never from the caller's word.
+const update_demographics: Handler = async (args) => {
+  const patientId = str(args.patientId);
+  if (!patientId) return { error: "patientId required" };
+
+  const updates: Partial<typeof schema.patients.$inferInsert> = {};
+  const email = str(args.email);
+  const phone = str(args.phone);
+  const address = str(args.address);
+  const insurancePayer = str(args.insurancePayer);
+  if (email) updates.email = email;
+  if (phone) updates.phone = phone;
+  if (address) updates.address = address;
+  if (insurancePayer) updates.insurancePayer = insurancePayer;
+
+  if (Object.keys(updates).length === 0) {
+    return { error: "Provide at least one of: email, phone, address, insurancePayer" };
+  }
+
+  const [patient] = await db()
+    .update(schema.patients)
+    .set({ ...updates, updatedAt: new Date() })
+    .where(eq(schema.patients.id, patientId))
+    .returning();
+  if (!patient) return { error: "Patient not found — call identify_patient first" };
+
+  const missingDemographics = missingDemographicsOf(patient);
+  return {
+    updated: true,
+    saved: Object.keys(updates),
+    missingDemographics,
     note: missingDemographics.length
-      ? `Missing on file: ${missingDemographics.join(", ")}. Do not book until obtained (spec §3.4.5) — collect what the caller can provide now.`
-      : "Record complete.",
+      ? `Saved. Still missing: ${missingDemographics.join(", ")}. Ask for the NEXT item now — just ${missingDemographics[0]}, one question, confirm it back, save it. If the caller cannot supply it, do not book — escalate_to_staff.`
+      : insurancePayer
+        ? "Demographics complete. Insurance payer recorded — run check_insurance to verify it is active before booking."
+        : "Demographics complete.",
   };
 };
 
@@ -235,6 +305,35 @@ const find_slots: Handler = async (args) => {
   };
 };
 
+// Spec §3.2 "assign provider/location": pick a provider covering the booked
+// location, least-loaded by upcoming appointments. Provisional until the
+// clinic's provider-level availability grid exists (§7.1) — ops can then move
+// assignment into availability_rules without changing callers.
+async function assignProvider(
+  location: LocationCode,
+): Promise<{ id: string; name: string; role: string } | null> {
+  const providers = await db().select().from(schema.providers);
+  const eligible = providers.filter((p) => p.locations.includes(location));
+  if (eligible.length === 0) return null;
+
+  const upcoming = await db()
+    .select({ providerId: schema.appointments.providerId })
+    .from(schema.appointments)
+    .where(
+      and(
+        gte(schema.appointments.startsAt, new Date()),
+        inArray(schema.appointments.status, ["booked", "confirmed", "rescheduled"]),
+      ),
+    );
+  const load = new Map<string, number>();
+  for (const a of upcoming) {
+    if (a.providerId) load.set(a.providerId, (load.get(a.providerId) ?? 0) + 1);
+  }
+  eligible.sort((a, b) => (load.get(a.id) ?? 0) - (load.get(b.id) ?? 0));
+  const chosen = eligible[0];
+  return { id: chosen.id, name: chosen.name, role: chosen.role };
+}
+
 const book_appointment: Handler = async (args, vapiCallId) => {
   const patientId = str(args.patientId);
   const slotId = str(args.slotId);
@@ -262,12 +361,15 @@ const book_appointment: Handler = async (args, vapiCallId) => {
   );
   const endsAt = new Date(slot.startsAt.getTime() + (rule?.slotMinutes ?? 30) * 60_000);
 
+  const provider = await assignProvider(slot.location);
+
   const [appt] = await db()
     .insert(schema.appointments)
     .values({
       patientId,
       type: slot.type,
       location: slot.location,
+      providerId: provider?.id ?? null,
       startsAt: slot.startsAt,
       endsAt,
       bookedByVapiCallId: vapiCallId,
@@ -278,7 +380,7 @@ const book_appointment: Handler = async (args, vapiCallId) => {
   await writeNote(
     patientId,
     vapiCallId,
-    `Booked ${slot.type} at ${slot.location} for ${slot.startsAt.toISOString()} (appt ${appt.id}).`,
+    `Booked ${slot.type} at ${slot.location} for ${slot.startsAt.toISOString()} (appt ${appt.id})${provider ? ` with ${provider.name}, ${provider.role}` : ""}.`,
   );
 
   return {
@@ -286,6 +388,7 @@ const book_appointment: Handler = async (args, vapiCallId) => {
     appointmentId: appt.id,
     startsAt: slot.startsAt.toISOString(),
     location: slot.location,
+    provider: provider ? `${provider.name}, ${provider.role}` : null,
     prepInstructions: prep ?? "No special preparation needed.",
     readToCaller: prep != null,
   };
@@ -334,12 +437,18 @@ const reschedule_appointment: Handler = async (args, vapiCallId) => {
   const rule = rules.find(
     (r) => r.location === slot.location && r.dayOfWeek === slot.startsAt.getUTCDay(),
   );
+  // Location change may invalidate the assigned provider — re-assign if so.
+  let providerId = existing.providerId;
+  if (slot.location !== existing.location || providerId == null) {
+    providerId = (await assignProvider(slot.location))?.id ?? providerId;
+  }
   await db()
     .update(schema.appointments)
     .set({
       startsAt: slot.startsAt,
       endsAt: new Date(slot.startsAt.getTime() + (rule?.slotMinutes ?? 30) * 60_000),
       location: slot.location,
+      providerId,
       status: "rescheduled",
     })
     .where(eq(schema.appointments.id, existing.id));
@@ -458,15 +567,108 @@ const transfer_to_staff: Handler = async (args, vapiCallId, ctx) => {
     })),
   );
 
-  const unavailable = {
-    transferred: false,
-    tellCaller:
-      "No staff member is reachable for a live transfer right now. Capture full intake (name, date of birth, callback number, reason, actions taken) and use escalate_to_staff. Do not mention voicemail.",
+  // Failed transfer → write a minimal flag IMMEDIATELY, not just an instruction
+  // to the model. Guarantees a backend record even if the caller hangs up
+  // before intake; escalate_to_staff enriches this same flag afterwards.
+  const unavailable = async () => {
+    const [flag] = await db()
+      .insert(schema.flags)
+      .values({
+        vapiCallId,
+        reason: "callback",
+        routedToExt: owner.ext,
+        intake: {
+          topic,
+          summary: str(args.summary) ?? `Caller asked for ${owner.owns}; no one reachable.`,
+          reason: `Transfer to ${owner.ownerName} (ext ${owner.ext}) not possible — needs follow-up.`,
+          autoCreated: true,
+          ...clinicContext(new Date()),
+        },
+      })
+      .returning();
+    await getPorts().notify.notifyStaff({
+      reason: "callback",
+      routedToExt: owner.ext,
+      summary: `Unreachable transfer (${owner.owns}): ${str(args.summary) ?? topic}`,
+      flagId: flag.id,
+    });
+    return {
+      transferred: false,
+      flagId: flag.id,
+      tellCaller:
+        "No staff member is reachable for a live transfer right now. A follow-up flag has already been created. Now capture full intake (name, date of birth, callback number, reason, actions taken) and use escalate_to_staff to complete it. Do not mention voicemail.",
+    };
   };
 
-  if (decision.action === "flag") return unavailable;
   const isPhoneCall = (ctx?.callType ?? "").toLowerCase().includes("phone");
-  if (!isPhoneCall || !ctx?.controlUrl) return unavailable;
+
+  // DEMO MODE (staff DIDs not wired yet): a successful in-hours routing
+  // announces the named owner and ends the call as a simulated handoff.
+  // Routing outcome still lands in the backend (flag + note) for the demo
+  // dashboard. Off-hours keeps the normal flag/intake path.
+  if (getEnv().DEMO_TRANSFER_MODE && isPhoneCall && ctx?.controlUrl) {
+    const staffRow = staffRows.find((s) => s.ext === owner.ext);
+    if (isBusinessHours(new Date()) && staffRow?.available) {
+      // Caller-facing label ("medication refill specialist") beats internal
+      // owner names when the request type has no named §2 owner.
+      const specialistLabel = str(args.specialistLabel);
+      const spoken = specialistLabel
+        ? specialistLabel.toLowerCase().startsWith("next available")
+          ? "I understand. Please hold on while I transfer you to the next available staff member."
+          : `Got it — let me route you to our ${specialistLabel}. Hang on one second.`
+        : `I'm transferring you to ${owner.ownerName}, who handles that — one moment, please.`;
+      try {
+        const response = await fetch(ctx.controlUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "say", content: spoken, endCallAfterSpoken: true }),
+        });
+        if (response.ok) {
+          const [flag] = await db()
+            .insert(schema.flags)
+            .values({
+              vapiCallId,
+              reason: "callback",
+              routedToExt: owner.ext,
+              intake: {
+                topic,
+                summary: str(args.summary) ?? topic,
+                simulatedTransfer: true,
+                specialistLabel: specialistLabel ?? undefined,
+                reason: `Demo transfer: routed to ${owner.ownerName} (ext ${owner.ext}) for ${specialistLabel ?? owner.owns}; call ended as simulated handoff.`,
+                ...clinicContext(new Date()),
+              },
+            })
+            .returning();
+          await getPorts().notify.notifyStaff({
+            reason: "callback",
+            routedToExt: owner.ext,
+            summary: `Demo transfer (${owner.owns}): ${str(args.summary) ?? topic}`,
+            flagId: flag.id,
+          });
+          await writeNote(
+            null,
+            vapiCallId,
+            `Demo-mode transfer: routed caller to ${owner.ownerName} (ext ${owner.ext}) for ${owner.owns}; call ended as simulated handoff.`,
+          );
+          return {
+            transferred: true,
+            demoSimulated: true,
+            ownerName: owner.ownerName,
+            tellCaller:
+              "The transfer announcement is playing and the call will end automatically. Do not say anything else.",
+          };
+        }
+        console.error(`[transfer_to_staff] demo say ${response.status}`);
+      } catch (err) {
+        console.error("[transfer_to_staff] demo say failed", err);
+      }
+      // Demo announcement failed → fall through to the normal paths below.
+    }
+  }
+
+  if (decision.action === "flag") return unavailable();
+  if (!isPhoneCall || !ctx?.controlUrl) return unavailable();
 
   try {
     const response = await fetch(ctx.controlUrl, {
@@ -484,11 +686,11 @@ const transfer_to_staff: Handler = async (args, vapiCallId, ctx) => {
     });
     if (!response.ok) {
       console.error(`[transfer_to_staff] control URL ${response.status}`);
-      return unavailable;
+      return unavailable();
     }
   } catch (err) {
     console.error("[transfer_to_staff] control URL failed", err);
-    return unavailable;
+    return unavailable();
   }
 
   await writeNote(
@@ -522,16 +724,43 @@ const escalate_to_staff: Handler = async (args, vapiCallId) => {
     ? (reason as (typeof validReasons)[number])
     : "low_confidence";
 
-  const [flag] = await db()
-    .insert(schema.flags)
-    .values({
-      vapiCallId,
-      patientId: str(args.patientId),
-      reason: flagReason,
-      intake,
-      routedToExt: owner?.ext ?? null,
-    })
-    .returning();
+  const stampedIntake = { ...intake, ...clinicContext(new Date()) };
+
+  // If transfer_to_staff already auto-created a minimal flag on this call,
+  // enrich it with the full intake instead of creating a duplicate.
+  const existing = (
+    await db().select().from(schema.flags).where(eq(schema.flags.vapiCallId, vapiCallId))
+  ).find(
+    (f) =>
+      f.status === "open" && (f.intake as Record<string, unknown> | null)?.autoCreated === true,
+  );
+
+  const [flag] = existing
+    ? await db()
+        .update(schema.flags)
+        .set({
+          patientId: str(args.patientId) ?? existing.patientId,
+          reason: flagReason,
+          routedToExt: owner?.ext ?? existing.routedToExt,
+          intake: {
+            ...(existing.intake as Record<string, unknown>),
+            ...stampedIntake,
+            autoCreated: undefined,
+            enriched: true,
+          },
+        })
+        .where(eq(schema.flags.id, existing.id))
+        .returning()
+    : await db()
+        .insert(schema.flags)
+        .values({
+          vapiCallId,
+          patientId: str(args.patientId),
+          reason: flagReason,
+          intake: stampedIntake,
+          routedToExt: owner?.ext ?? null,
+        })
+        .returning();
 
   await getPorts().notify.notifyStaff({
     reason: flagReason,
@@ -544,7 +773,7 @@ const escalate_to_staff: Handler = async (args, vapiCallId) => {
     flagged: true,
     flagId: flag.id,
     tellCaller:
-      "Someone from the team will follow up. Everything has been written down — the caller will not need to repeat the basics.",
+      "Tell the caller warmly, in first person: you've noted everything down and you're getting this to the right person as soon as possible — they'll reach out just as soon as they can, and the caller won't need to repeat any of it. If they ask for a specific callback time, do NOT promise one — acknowledge it matters to them and repeat the as-soon-as-possible commitment.",
   };
 };
 
@@ -562,6 +791,7 @@ const flag_emergency: Handler = async (args, vapiCallId) => {
         callbackNumber,
         callerName: str(args.callerName),
         capturedAt: new Date().toISOString(),
+        ...clinicContext(new Date()),
       },
     })
     .returning();
@@ -585,6 +815,7 @@ const flag_emergency: Handler = async (args, vapiCallId) => {
 
 export const TOOL_HANDLERS: Record<string, Handler> = {
   identify_patient,
+  update_demographics,
   check_insurance,
   verify_study_auth,
   find_slots,

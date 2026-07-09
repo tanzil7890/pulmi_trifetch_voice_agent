@@ -46,6 +46,46 @@ describe("canBook (spec §3.4 checklist enforcement)", () => {
     expect(gate.allowed).toBe(false);
   });
 
+  it("unblocks after update_demographics fills the gaps (spec §3.2 collect missing demographics)", () => {
+    const identityMissing = exec("identify_patient", {
+      patientId: "p1",
+      missingDemographics: ["email", "address"],
+    });
+    const demographicsFilled = exec("update_demographics", {
+      updated: true,
+      missingDemographics: [],
+    });
+    expect(canBook("follow_up", [identityMissing, insuranceOk]).allowed).toBe(false);
+    expect(
+      canBook("follow_up", [identityMissing, insuranceOk, demographicsFilled]).allowed,
+    ).toBe(true);
+  });
+
+  it("stays blocked while update_demographics still reports gaps", () => {
+    const identityMissing = exec("identify_patient", {
+      patientId: "p1",
+      missingDemographics: ["email", "address", "insurance"],
+    });
+    const partial = exec("update_demographics", {
+      updated: true,
+      missingDemographics: ["insurance"],
+    });
+    const gate = canBook("follow_up", [identityMissing, insuranceOk, partial]);
+    expect(gate.allowed).toBe(false);
+    if (!gate.allowed) expect(gate.missingSteps.join(" ")).toMatch(/insurance/);
+  });
+
+  it("re-running identify_patient after update_demographics wins (latest execution)", () => {
+    const filled = exec("update_demographics", { updated: true, missingDemographics: [] });
+    const identityStillMissing = exec("identify_patient", {
+      patientId: "p1",
+      missingDemographics: ["email"],
+    });
+    expect(
+      canBook("follow_up", [insuranceOk, filled, identityStillMissing]).allowed,
+    ).toBe(false);
+  });
+
   it("blocks when referral required but not on file", () => {
     const needsReferral = exec("check_insurance", {
       active: true,

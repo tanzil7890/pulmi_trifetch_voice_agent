@@ -25,12 +25,12 @@ export type BookingGate =
 
 function resultOf(
   executions: ToolExecutionRecord[],
-  toolName: string,
+  ...toolNames: string[]
 ): Record<string, unknown> | null {
   // Latest successful execution wins (patient may correct info mid-call).
   for (let i = executions.length - 1; i >= 0; i--) {
     const e = executions[i];
-    if (e.toolName === toolName && e.status === "ok") {
+    if (toolNames.includes(e.toolName) && e.status === "ok") {
       return (e.result ?? null) as Record<string, unknown> | null;
     }
   }
@@ -43,9 +43,12 @@ export function deriveChecklist(
   const identity = resultOf(executions, "identify_patient");
   const insurance = resultOf(executions, "check_insurance");
   const auth = resultOf(executions, "verify_study_auth");
+  // Demographics gaps can be filled mid-call (spec §3.2 "collect missing
+  // demographics") — the latest of identify_patient / update_demographics wins.
+  const demographics = resultOf(executions, "identify_patient", "update_demographics");
 
-  const missingDemographics = Array.isArray(identity?.missingDemographics)
-    ? (identity.missingDemographics as string[])
+  const missingDemographics = Array.isArray(demographics?.missingDemographics)
+    ? (demographics.missingDemographics as string[])
     : [];
 
   return {

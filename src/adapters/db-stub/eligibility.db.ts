@@ -20,15 +20,43 @@ export class DbStubEligibilityAdapter implements EligibilityPort {
       };
     }
     const known = p.insuranceStatus !== "unknown" && p.isHmo !== null;
+    if (known) {
+      return {
+        active: p.insuranceStatus === "active",
+        isHmo: p.isHmo,
+        isMedicare: p.isMedicare,
+        // Stub heuristic: if a referral flag exists on the record, the plan
+        // requires one. The eligibility partner will answer this properly.
+        referralRequired: p.referralOnFile !== null ? true : null,
+        referralOnFile: p.referralOnFile,
+        verified: known,
+      };
+    }
+
+    // Record has no verified status yet (typically a brand-new patient). Real
+    // verification is the eligibility partner's job; until that integration,
+    // this stub simulates it from the payer the caller stated so the demo
+    // booking flow can complete end-to-end. Payer names containing "HMO" /
+    // "Medicare" still exercise those policy paths.
+    if (p.insurancePayer) {
+      const payer = p.insurancePayer.toLowerCase();
+      return {
+        active: true,
+        isHmo: payer.includes("hmo"),
+        isMedicare: payer.includes("medicare"),
+        referralRequired: null,
+        referralOnFile: p.referralOnFile,
+        verified: true,
+      };
+    }
+
     return {
-      active: p.insuranceStatus === "active",
-      isHmo: p.isHmo,
-      isMedicare: p.isMedicare,
-      // Stub heuristic: if a referral flag exists on the record, the plan
-      // requires one. The eligibility partner will answer this properly.
-      referralRequired: p.referralOnFile !== null ? true : null,
+      active: false,
+      isHmo: null,
+      isMedicare: null,
+      referralRequired: null,
       referralOnFile: p.referralOnFile,
-      verified: known,
+      verified: false,
     };
   }
 

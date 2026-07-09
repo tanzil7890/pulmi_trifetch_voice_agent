@@ -22,6 +22,13 @@ const envSchema = z
       .string()
       .optional()
       .transform((v) => v === "true"),
+    // Demo mode: staff DIDs don't exist yet, so a successful in-hours routing
+    // announces the named owner and ends the call as a simulated handoff.
+    // Remove (or set false) once real RingCentral extensions are configured.
+    DEMO_TRANSFER_MODE: z
+      .string()
+      .optional()
+      .transform((v) => v === "true"),
     CRON_SECRET: z.string().optional(),
   })
   .superRefine((env, ctx) => {

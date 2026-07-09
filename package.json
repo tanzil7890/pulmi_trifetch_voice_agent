@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:live": "tsx scripts/dev-live.ts",
+    "dev:down": "lsof -ti:3000 | xargs kill 2>/dev/null; pkill -x ngrok 2>/dev/null; echo stopped",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",

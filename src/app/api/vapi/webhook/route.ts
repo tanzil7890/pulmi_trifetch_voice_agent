@@ -12,7 +12,7 @@ import { TOOL_HANDLERS } from "@/vapi/tools/handlers";
 import { queueTransitionFor, type OutboundOutcome } from "@/core/outcomes";
 import { nextBusinessDayRetry } from "@/core/attempts";
 import { routeTopic } from "@/core/routing";
-import { decideHandoff } from "@/core/escalation";
+import { clinicContext, decideHandoff } from "@/core/escalation";
 
 export const runtime = "nodejs";
 // Vapi guidance: host near us-west-2 for tool-call latency.
@@ -158,6 +158,41 @@ async function handleEndOfCallReport(message: ServerMessage, raw: unknown) {
     });
 
   await recordEvent(vapiCallId, "end-of-call-report", "final", raw);
+
+  // Silent-hang-up net (spec §3.3): an off-hours inbound call that ended
+  // unresolved and never produced a flag (caller hung up mid-intake, model
+  // skipped escalate_to_staff, tools unreachable) still needs a backend
+  // record — auto-flag it from whatever the call analysis captured.
+  if (direction === "inbound" && outcomeRaw === "spoke_no_appt") {
+    const startedAt = message.startedAt ? new Date(message.startedAt) : new Date();
+    const context = clinicContext(startedAt);
+    if (context.offHours) {
+      const [existingFlag] = await db()
+        .select({ id: schema.flags.id })
+        .from(schema.flags)
+        .where(eq(schema.flags.vapiCallId, vapiCallId))
+        .limit(1);
+      if (!existingFlag) {
+        await db().insert(schema.flags).values({
+          vapiCallId,
+          reason: "low_confidence",
+          intake: {
+            name: typeof structured.patientName === "string" ? structured.patientName : null,
+            dob: typeof structured.dob === "string" ? structured.dob : null,
+            phone:
+              (typeof structured.callbackNumber === "string" ? structured.callbackNumber : null) ??
+              message.call?.customer?.number ??
+              null,
+            reason:
+              "Off-hours call ended without resolution or escalation — auto-flagged from call summary.",
+            summary: analysis?.summary ?? null,
+            autoCreated: true,
+            ...context,
+          },
+        });
+      }
+    }
+  }
 
   // Close the outbound loop: attempt row → queue transition (spec §4.2/§4.4).
   const [attempt] = await db()
